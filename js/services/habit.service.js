@@ -99,3 +99,44 @@ export async function archiveHabit(habitId) {
     
     return true;
 }
+
+/**
+ * Fetches all archived habits for the currently logged-in user.
+ */
+export async function getArchivedHabits() {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session) throw new Error("User not logged in");
+
+    const userId = sessionData.session.user.id;
+
+    const { data, error } = await supabase
+        .from('habits')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('status', 'archived')
+        .order('updated_at', { ascending: false });
+
+    if (error) {
+        console.error("Error fetching archived habits:", error.message);
+        throw error;
+    }
+
+    return data;
+}
+
+/**
+ * Permanently deletes a habit from the database.
+ */
+export async function deleteHabitPermanently(habitId) {
+    const { error } = await supabase
+        .from('habits')
+        .delete()
+        .eq('id', habitId);
+
+    if (error) {
+        console.error("Error permanently deleting habit:", error.message);
+        throw error;
+    }
+    
+    return true;
+}
