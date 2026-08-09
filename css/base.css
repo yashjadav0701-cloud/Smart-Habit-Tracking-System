@@ -1,0 +1,46 @@
+/* css/base.css */
+
+body {
+    font-family: var(--font-ui);
+    background-color: var(--bg-deep);
+    color: var(--text-main);
+    font-size: 16px;
+    
+    /* Prevents "bouncy" scrolling on Mac/iOS to make it feel like a native app */
+    overscroll-behavior-y: none; 
+    overflow-x: hidden;
+}
+
+/* Headings use the Lexend font for a polished, modern look */
+h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-heading);
+    font-weight: 700;
+    line-height: 1.2;
+    color: var(--text-main);
+}
+
+/* Premium dark custom scrollbars for WebKit (Chrome, Edge, Safari) */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-deep); 
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border-color); 
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted); 
+}
+
+/* Global utility classes for text colors */
+.text-muted { color: var(--text-muted); }
+.text-success { color: var(--success); }
+.text-warning { color: var(--warning); }
+.text-danger { color: var(--danger); }
+.text-primary { color: var(--primary); }

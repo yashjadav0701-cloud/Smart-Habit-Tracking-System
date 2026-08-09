@@ -1,0 +1,93 @@
+/* css/calendar.css */
+
+.calendar-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+    background: var(--surface);
+    padding: 16px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-color);
+}
+
+.calendar-controls h2 {
+    margin: 0;
+    font-size: 20px;
+    font-family: var(--font-heading);
+}
+
+.calendar-grid {
+    display: grid !important;
+    grid-template-columns: repeat(7, 1fr) !important;
+    gap: 10px;
+    margin-bottom: 24px;
+    width: 100%;
+}
+
+.calendar-day-name {
+    text-align: center;
+    font-weight: 600;
+    color: var(--text-muted);
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding-bottom: 8px;
+}
+
+.calendar-day {
+    aspect-ratio: 1; /* Keeps the boxes perfectly square */
+    background: var(--bg-deep);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    transition: var(--transition-fast);
+    cursor: default;
+}
+
+.calendar-day:hover {
+    border-color: var(--border-focus);
+    transform: translateY(-2px);
+}
+
+.calendar-day.empty-day {
+    background: transparent;
+    border: none;
+    pointer-events: none;
+}
+
+.day-number {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-main);
+    margin-bottom: auto;
+}
+
+/* Highlight today's date */
+.calendar-day.is-today {
+    border-color: var(--primary);
+    background: var(--surface);
+}
+
+.calendar-day.is-today .day-number {
+    color: var(--primary);
+    font-weight: 800;
+}
+
+/* Dots representing completed habits */
+.day-dots {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 8px;
+}
+
+.day-dots .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--primary);
+    box-shadow: var(--primary-glow);
+}

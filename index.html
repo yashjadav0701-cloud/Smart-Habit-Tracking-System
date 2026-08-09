@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Smart Habits Tracker</title>
+    <!-- Add Favicon (Small Logo) -->
+    <link rel="icon" type="image/svg+xml" href="assets/images/smht-title-logo.svg">
+    
+    <!-- Fonts: Inter (UI) & Lexend (Headings/Numbers) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Lexend:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <!-- Icons (FontAwesome) -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    
+    <!-- External Libraries (Chart.js for analytics, Supabase for backend) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="css/variables.css">
+    <link rel="stylesheet" href="css/reset.css">
+    <link rel="stylesheet" href="css/base.css">
+    <link rel="stylesheet" href="css/layout.css">
+    <link rel="stylesheet" href="css/components.css">
+    <link rel="stylesheet" href="css/dashboard.css">
+    <link rel="stylesheet" href="css/auth.css">
+    <link rel="stylesheet" href="css/habits.css"> 
+    <link rel="stylesheet" href="css/calendar.css">
+    <link rel="stylesheet" href="css/insights.css">
+    <link rel="stylesheet" href="css/mobile.css">
+    <link rel="stylesheet" href="css/toast.css"> <!-- NEWLY ADDED -->
+</head>
+<body>
+    
+    <!-- Authentication Overlay (Visible by default) -->
+    <div id="auth-screen" class="auth-wrapper">
+        <div class="glass-panel auth-card">
+            <div class="auth-header">
+                <img src="assets/images/smht-wide-logo.svg" alt="Smart Habits Tracker" style="max-width: 280px; margin-bottom: 16px;">
+                <p class="auth-subtitle">Master your discipline. Track your progress. Achieve your goals.</p>
+            </div>
+            <button id="btn-login" class="btn-google">
+                <i class="fa-brands fa-google"></i> Continue with Google
+            </button>
+        </div>
+    </div>
+
+    <!-- Main App Shell -->
+    <div id="app" class="app-container">
+        
+        <!-- Navigation Sidebar -->
+        <nav id="sidebar" class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-container" id="logo-container" style="padding: 10px 0;">
+                    <img src="assets/images/smht-wide-logo.svg" alt="Smart Habits Tracker" style="max-width: 180px;">
+                </div>
+            </div>
+            
+            <ul class="nav-links">
+                <li><a href="#dashboard" class="nav-link active" data-route="dashboard"><i class="fa-solid fa-chart-pie"></i> <span>Dashboard</span></a></li>
+                <li><a href="#habits" class="nav-link" data-route="habits"><i class="fa-solid fa-list-check"></i> <span>Habits</span></a></li>
+                <li><a href="#calendar" class="nav-link" data-route="calendar"><i class="fa-solid fa-calendar-days"></i> <span>Calendar</span></a></li>
+                <li><a href="#goals" class="nav-link" data-route="goals"><i class="fa-solid fa-bullseye"></i> <span>Goals</span></a></li>
+                <li><a href="#insights" class="nav-link" data-route="insights"><i class="fa-solid fa-lightbulb"></i> <span>Insights</span></a></li>
+                <li><a href="#profile" class="nav-link" data-route="profile"><i class="fa-solid fa-user"></i> <span>Profile</span></a></li>
+            </ul>
+        </nav>
+
+        <!-- Main Content Area -->
+        <main id="main-content" class="main-content">
+            
+            <!-- Mobile Top Header (Only visible on small screens) -->
+            <style>
+                .mobile-logo-header { display: none; }
+                @media (max-width: 768px) {
+                    .mobile-logo-header { 
+                        display: flex; 
+                        align-items: center; 
+                        padding: 16px 16px 0 16px; 
+                        margin-bottom: -5px; 
+                    }
+                    .mobile-logo-header img { 
+                        max-width: 180px; 
+                        height: auto; 
+                    }
+                }
+            </style>
+            <div class="mobile-logo-header">
+                <img src="assets/images/smht-wide-logo.svg" alt="Smart Habits Tracker">
+            </div>
+
+            <div id="view-container">
+                <div class="initial-load">
+                    <h2>Loading environment...</h2>
+                </div>
+            </div>
+        </main>
+        
+        <!-- Global UI Overlays -->
+        <div id="modals-container"></div>
+        <div id="toast-container"></div>
+        
+    </div>
+
+    <!-- Main JavaScript Entry Point -->
+    <script type="module" src="js/app.js"></script>
+</body>
+</html>
