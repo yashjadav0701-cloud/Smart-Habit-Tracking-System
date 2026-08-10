@@ -20,18 +20,7 @@
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
     <!-- Stylesheets -->
-    <link rel="stylesheet" href="css/variables.css">
-    <link rel="stylesheet" href="css/reset.css">
-    <link rel="stylesheet" href="css/base.css">
-    <link rel="stylesheet" href="css/layout.css">
-    <link rel="stylesheet" href="css/components.css">
-    <link rel="stylesheet" href="css/dashboard.css">
-    <link rel="stylesheet" href="css/auth.css">
-    <link rel="stylesheet" href="css/habits.css"> 
-    <link rel="stylesheet" href="css/calendar.css">
-    <link rel="stylesheet" href="css/insights.css">
-    <link rel="stylesheet" href="css/mobile.css">
-    <link rel="stylesheet" href="css/toast.css"> <!-- NEWLY ADDED -->
+    <link rel="stylesheet" href="css/app.css?v=1.0">
 </head>
 <body>
     
@@ -108,7 +97,12 @@
         
     </div>
 
-    <!-- Main JavaScript Entry Point -->
-    <script type="module" src="js/app.js"></script>
+    <!-- Unified JS Application -->
+    <!-- Ensure Supabase & Chart.js are loaded first -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <!-- Add 'defer' to wait for the libraries above to finish -->
+    <script src="js/app.js?v=1.0" defer></script>
 </body>
 </html>
