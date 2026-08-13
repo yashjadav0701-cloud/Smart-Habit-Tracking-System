@@ -62,9 +62,14 @@ async function getHabits() {
 
 async function getArchivedHabits() {
     const { data: sessionData } = await supabase.auth.getSession();
+    
+    // ADD THIS LINE: Verify the session exists before trying to read the user ID
+    if (!sessionData.session) throw new Error("User not logged in");
+    
     const { data, error } = await supabase
         .from('habits').select('*').eq('user_id', sessionData.session.user.id).eq('status', 'archived')
         .order('updated_at', { ascending: false });
+        
     if (error) throw error;
     return data;
 }
@@ -77,17 +82,29 @@ async function createHabit(habitData) {
         icon: habitData.icon || 'fa-bullseye',
         priority: habitData.priority || 'Medium',
         type: habitData.type || 'boolean',
+        target: habitData.target || 1,
+        unit: habitData.unit || '',
         frequency: habitData.frequency || 'daily'
     }]).select().single();
     if (error) throw error;
+    
+    if (habitData.goal_id) {
+        await supabase.from('goal_habits').insert([{ goal_id: habitData.goal_id, habit_id: data.id, user_id: sessionData.session.user.id }]);
+    }
     return data;
 }
 
 async function updateHabit(habitId, habitData) {
+    const { data: sessionData } = await supabase.auth.getSession();
     const { data, error } = await supabase.from('habits').update({
-        name: habitData.name, icon: habitData.icon, priority: habitData.priority, updated_at: new Date().toISOString()
+        name: habitData.name, icon: habitData.icon, priority: habitData.priority, type: habitData.type, target: habitData.target, unit: habitData.unit, frequency: habitData.frequency, updated_at: new Date().toISOString()
     }).eq('id', habitId).select().single();
     if (error) throw error;
+    
+    await supabase.from('goal_habits').delete().eq('habit_id', habitId);
+    if (habitData.goal_id) {
+        await supabase.from('goal_habits').insert([{ goal_id: habitData.goal_id, habit_id: habitId, user_id: sessionData.session.user.id }]);
+    }
     return data;
 }
 
@@ -103,18 +120,53 @@ async function deleteHabitPermanently(habitId) {
     return true;
 }
 
+// --- Goal Linking Service ---
+async function updateGoalProgressFromHabit(habitId, valueAdded) {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const userId = sessionData.session.user.id;
+    const { data: links } = await supabase.from('goal_habits').select('goal_id').eq('habit_id', habitId).eq('user_id', userId);
+    if (links && links.length > 0) {
+        for (const link of links) {
+            const { data: goal } = await supabase.from('goals').select('current_value, target_value').eq('id', link.goal_id).single();
+            if (goal) {
+                let newVal = parseFloat(goal.current_value) + parseFloat(valueAdded);
+                if (newVal < 0) newVal = 0;
+                let status = newVal >= parseFloat(goal.target_value) ? 'completed' : 'active';
+                await supabase.from('goals').update({ current_value: newVal, status: status }).eq('id', link.goal_id);
+            }
+        }
+    }
+}
+
 // --- Completion Service ---
 async function getDailyHabits(dateString) {
     const { data: sessionData } = await supabase.auth.getSession();
     if (!sessionData.session) throw new Error("User not logged in");
     const userId = sessionData.session.user.id;
+    
     const { data: habits, error: habitsError } = await supabase.from('habits').select('*').eq('user_id', userId).eq('status', 'active').order('display_order', { ascending: true }).order('created_at', { ascending: false });
     if (habitsError) throw habitsError;
+    
     const { data: completions, error: compError } = await supabase.from('habit_completions').select('*').eq('user_id', userId).eq('completion_date', dateString);
     if (compError) throw compError;
-    return habits.map(habit => {
+    
+    const targetDate = new Date(dateString + 'T00:00:00'); 
+    const dayOfWeek = targetDate.getDay();
+    const isWeekend = (dayOfWeek === 0 || dayOfWeek === 6);
+
+    const scheduledHabits = habits.filter(habit => {
+        if (habit.frequency === 'weekdays' && isWeekend) return false;
+        if (habit.frequency === 'weekends' && !isWeekend) return false;
+        return true; 
+    });
+
+    return scheduledHabits.map(habit => {
         const completionRecord = completions.find(c => c.habit_id === habit.id);
-        return { ...habit, is_completed: completionRecord ? completionRecord.completed : false };
+        return { 
+            ...habit, 
+            is_completed: completionRecord ? completionRecord.completed : false,
+            completion_value: completionRecord ? completionRecord.value : null
+        };
     });
 }
 
@@ -124,10 +176,31 @@ async function toggleHabitCompletion(habitId, dateString, isCompleted) {
     if (isCompleted) {
         const { error } = await supabase.from('habit_completions').upsert({ habit_id: habitId, user_id: userId, completion_date: dateString, completed: true, completed_at: new Date().toISOString() }, { onConflict: 'habit_id, completion_date' });
         if (error) throw error;
+        await updateGoalProgressFromHabit(habitId, 1);
+    } else {
+        const { error } = await supabase.from('habit_completions').delete().match({ habit_id: habitId, completion_date: dateString, user_id: userId });
+        if (error) throw error;
+        await updateGoalProgressFromHabit(habitId, -1);
+    }
+}
+
+async function logNumericProgress(habitId, dateString, value, target, previousValue = 0) {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const userId = sessionData.session.user.id;
+    const isCompleted = parseFloat(value) >= parseFloat(target);
+    const valueDifference = parseFloat(value) - parseFloat(previousValue);
+    
+    if (parseFloat(value) > 0) {
+        const { error } = await supabase.from('habit_completions').upsert({ 
+            habit_id: habitId, user_id: userId, completion_date: dateString, 
+            completed: isCompleted, value: value, completed_at: new Date().toISOString() 
+        }, { onConflict: 'habit_id, completion_date' });
+        if (error) throw error;
     } else {
         const { error } = await supabase.from('habit_completions').delete().match({ habit_id: habitId, completion_date: dateString, user_id: userId });
         if (error) throw error;
     }
+    await updateGoalProgressFromHabit(habitId, valueDifference);
 }
 
 // --- History Service ---
@@ -171,6 +244,79 @@ async function getWeeklyTrend() {
     return trendData;
 }
 
+// --- Goals Service ---
+async function getGoals() {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session) throw new Error("User not logged in");
+    const { data, error } = await supabase.from('goals').select('*').eq('user_id', sessionData.session.user.id).order('created_at', { ascending: true });
+    if (error) throw error;
+    return data;
+}
+
+async function createGoal(title, targetValue = 100) {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const { data, error } = await supabase.from('goals').insert([{ 
+        user_id: sessionData.session.user.id, 
+        title: title,
+        status: 'active',
+        current_value: 0,
+        target_value: targetValue
+    }]).select().single();
+    if (error) throw error;
+    return data;
+}
+
+async function toggleGoalCompletion(goalId, isCompleted) {
+    const { data: goal } = await supabase.from('goals').select('target_value').eq('id', goalId).single();
+    const newStatus = isCompleted ? 'completed' : 'active';
+    const newValue = isCompleted ? (goal ? goal.target_value : 100) : 0;
+    const { error } = await supabase.from('goals').update({ 
+        status: newStatus,
+        current_value: newValue,
+        updated_at: new Date().toISOString()
+    }).eq('id', goalId);
+    if (error) throw error;
+}
+
+async function deleteGoal(goalId) {
+    const { error } = await supabase.from('goals').delete().eq('id', goalId);
+    if (error) throw error;
+}
+
+// --- Reflections Service ---
+async function getDailyReflection(dateString) {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session) throw new Error("User not logged in");
+    
+    const { data, error } = await supabase
+        .from('daily_reflections')
+        .select('*')
+        .eq('user_id', sessionData.session.user.id)
+        .eq('reflection_date', dateString)
+        .maybeSingle(); 
+        
+    if (error) throw error;
+    return data;
+}
+
+async function saveDailyReflection(dateString, mood, note) {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const userId = sessionData.session.user.id;
+    
+    // Check if an entry already exists for today
+    const { data: existing } = await supabase.from('daily_reflections').select('id').eq('user_id', userId).eq('reflection_date', dateString).maybeSingle();
+
+    if (existing) {
+        // Update existing entry
+        const { error } = await supabase.from('daily_reflections').update({ mood: mood, note: note, updated_at: new Date().toISOString() }).eq('id', existing.id);
+        if (error) throw error;
+    } else {
+        // Create new entry
+        const { error } = await supabase.from('daily_reflections').insert([{ user_id: userId, reflection_date: dateString, mood: mood, note: note }]);
+        if (error) throw error;
+    }
+}
+
 
 /* ==========================================================================
    4. UI COMPONENTS (Toast & Modals)
@@ -211,9 +357,20 @@ function showConfirmDialog(title, message, onConfirm) {
     });
 }
 
-function openHabitModal(onSuccessCallback, existingHabit = null) {
+async function openHabitModal(onSuccessCallback, existingHabit = null) {
     const modalContainer = document.getElementById('modals-container');
     const isEdit = !!existingHabit;
+    
+    let linkedGoalId = null;
+    let availableGoals = [];
+    try {
+        availableGoals = await getGoals();
+        if (isEdit) {
+            const { data: sessionData } = await supabase.auth.getSession();
+            const { data: linkData } = await supabase.from('goal_habits').select('goal_id').eq('habit_id', existingHabit.id).eq('user_id', sessionData.session.user.id).maybeSingle();
+            if (linkData) linkedGoalId = linkData.goal_id;
+        }
+    } catch (e) { console.error(e); }
     
     const icons = [
         { class: 'fa-bullseye', name: 'Focus / Goals' }, { class: 'fa-dumbbell', name: 'Exercise' }, 
@@ -225,6 +382,11 @@ function openHabitModal(onSuccessCallback, existingHabit = null) {
     ];
 
     let selectedIcon = isEdit ? existingHabit.icon : icons[0].class;
+    
+    let goalOptions = '<option value="">-- No Linked Goal --</option>';
+    availableGoals.forEach(g => {
+        goalOptions += `<option value="${g.id}" ${linkedGoalId === g.id ? 'selected' : ''}>${g.title}</option>`;
+    });
 
     modalContainer.innerHTML = `
         <div id="habit-modal" class="modal-overlay" style="pointer-events: auto;">
@@ -244,14 +406,46 @@ function openHabitModal(onSuccessCallback, existingHabit = null) {
                             ${icons.map(iconObj => `<div class="icon-option ${selectedIcon === iconObj.class ? 'selected' : ''}" data-icon="${iconObj.class}" title="${iconObj.name}"><i class="fa-solid ${iconObj.class}"></i></div>`).join('')}
                         </div>
                     </div>
-                    <div style="margin-bottom: 32px;">
-                        <label style="display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 14px;">Priority</label>
-                        <select id="habit-priority" style="width: 100%; padding: 12px; background: var(--bg-deep); border: 1px solid var(--border-color); color: white; border-radius: var(--radius-sm); cursor: pointer;">
-                            <option value="Low" ${isEdit && existingHabit.priority === 'Low' ? 'selected' : ''}>Low</option>
-                            <option value="Medium" ${!isEdit || existingHabit.priority === 'Medium' ? 'selected' : ''}>Medium</option>
-                            <option value="High" ${isEdit && existingHabit.priority === 'High' ? 'selected' : ''}>High</option>
+                    
+                    try {
+            const habitData = {
+                name: document.getElementById('habit-name').value,
+                icon: selectedIcon,
+                priority: document.getElementById('habit-priority').value,
+                type: document.getElementById('habit-type').value,
+                target: parseFloat(document.getElementById('habit-target').value) || 1,
+                unit: document.getElementById('habit-unit').value.trim(),
+                frequency: document.getElementById('habit-frequency').value
+            };
+                    
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 14px;">Habit Type</label>
+                        <select id="habit-type" style="width: 100%; padding: 12px; background: var(--bg-deep); border: 1px solid var(--border-color); color: white; border-radius: var(--radius-sm); cursor: pointer;" onchange="document.getElementById('numeric-fields').style.display = this.value === 'numeric' ? 'block' : 'none'">
+                            <option value="boolean" ${!isEdit || existingHabit.type === 'boolean' ? 'selected' : ''}>Yes/No (Check-off)</option>
+                            <option value="numeric" ${isEdit && existingHabit.type === 'numeric' ? 'selected' : ''}>Numeric Target</option>
                         </select>
                     </div>
+                    
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 14px;">Link to a Goal (Optional)</label>
+                        <select id="habit-goal-link" style="width: 100%; padding: 12px; background: var(--bg-deep); border: 1px solid var(--border-color); color: white; border-radius: var(--radius-sm); cursor: pointer;">
+                            ${goalOptions}
+                        </select>
+                    </div>
+                    
+                    <div id="numeric-fields" style="display: ${isEdit && existingHabit.type === 'numeric' ? 'block' : 'none'}; margin-bottom: 32px;">
+                        <div style="display: flex; gap: 12px;">
+                            <div style="flex: 1;">
+                                <label style="display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 14px;">Target Goal</label>
+                                <input type="number" id="habit-target" autocomplete="off" style="width: 100%; padding: 12px; background: var(--bg-deep); border: 1px solid var(--border-color); color: white; border-radius: var(--radius-sm);" placeholder="e.g., 5" value="${isEdit ? existingHabit.target : '1'}">
+                            </div>
+                            <div style="flex: 2;">
+                                <label style="display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 14px;">Unit</label>
+                                <input type="text" id="habit-unit" autocomplete="off" style="width: 100%; padding: 12px; background: var(--bg-deep); border: 1px solid var(--border-color); color: white; border-radius: var(--radius-sm);" placeholder="e.g., Liters, Pages, Hours..." value="${isEdit ? (existingHabit.unit || '') : ''}">
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="modal-footer">
                         <button type="button" id="btn-cancel-modal" class="btn" style="background: transparent; border: 1px solid var(--border-color); color: white;">Cancel</button>
                         <button type="submit" id="btn-save-modal" class="btn btn-primary">${isEdit ? 'Update Habit' : 'Save Habit'}</button>
@@ -292,7 +486,11 @@ function openHabitModal(onSuccessCallback, existingHabit = null) {
                 name: document.getElementById('habit-name').value,
                 icon: selectedIcon,
                 priority: document.getElementById('habit-priority').value,
-                type: 'boolean', frequency: 'daily'
+                type: document.getElementById('habit-type').value,
+                target: parseFloat(document.getElementById('habit-target').value) || 1,
+                unit: document.getElementById('habit-unit').value.trim(),
+                frequency: 'daily',
+                goal_id: document.getElementById('habit-goal-link').value || null
             };
 
             if (isEdit) {
@@ -349,24 +547,50 @@ async function renderDashboardPage(container) {
         if (!card) return; 
 
         const habitId = card.dataset.id;
-        const newState = !card.classList.contains('completed'); 
-        
-        card.classList.toggle('completed', newState);
-        const checkIcon = card.querySelector('.check-icon');
-        
-        if (newState) {
-            checkIcon.classList.replace('fa-circle', 'fa-circle-check');
-            checkIcon.style.color = 'var(--primary)';
-            showToast("Habit completed! Great job.", "success");
-        } else {
-            checkIcon.classList.replace('fa-circle-check', 'fa-circle');
-            checkIcon.style.color = 'var(--text-muted)';
-            showToast("Habit unmarked.", "info");
+        const habitType = card.dataset.type;
+
+        // Handle Numeric Logging
+        if (habitType === 'numeric') {
+            if (e.target.closest('.btn-log')) {
+                const inputEl = card.querySelector('.numeric-input');
+                const val = parseFloat(inputEl.value) || 0;
+                const target = parseFloat(card.dataset.target);
+                const prevVal = parseFloat(inputEl.defaultValue) || 0;
+                
+                const btnLog = card.querySelector('.btn-log');
+                btnLog.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+                
+                try { 
+                    await logNumericProgress(habitId, dateString, val, target, prevVal); 
+                    if (val >= target) showToast("Target reached! Excellent.", "success");
+                    else showToast("Progress logged.", "info");
+                    await loadDailyHabitsUI(dateString); 
+                } 
+                catch (error) { alert("Network error: Could not log progress."); await loadDailyHabitsUI(dateString); }
+            }
+            return; // Exit early so clicking a numeric card doesn't toggle it
         }
-        
-        updateProgressDisplay(); 
-        try { await toggleHabitCompletion(habitId, dateString, newState); } 
-        catch (error) { alert("Network error: Could not save progress."); await loadDailyHabitsUI(dateString); }
+
+        // Handle Boolean Toggling
+        if (habitType === 'boolean') {
+            const newState = !card.classList.contains('completed'); 
+            card.classList.toggle('completed', newState);
+            const checkIcon = card.querySelector('.check-icon');
+            
+            if (newState) {
+                checkIcon.classList.replace('fa-circle', 'fa-circle-check');
+                checkIcon.style.color = 'var(--primary)';
+                showToast("Habit completed! Great job.", "success");
+            } else {
+                checkIcon.classList.replace('fa-circle-check', 'fa-circle');
+                checkIcon.style.color = 'var(--text-muted)';
+                showToast("Habit unmarked.", "info");
+            }
+            
+            updateProgressDisplay(); 
+            try { await toggleHabitCompletion(habitId, dateString, newState); } 
+            catch (error) { alert("Network error: Could not save progress."); await loadDailyHabitsUI(dateString); }
+        }
     });
 }
 
@@ -385,17 +609,33 @@ async function loadDailyHabitsUI(dateString) {
             return;
         }
 
-        container.innerHTML = habits.map(habit => `
-            <div class="daily-habit-card ${habit.is_completed ? 'completed' : ''}" data-id="${habit.id}" style="display: flex; align-items: center; padding: 20px; background: var(--surface); border: 1px solid var(--border-color); border-radius: var(--radius-md); cursor: pointer; transition: all 0.2s ease;">
+        container.innerHTML = habits.map(habit => {
+            const isNumeric = habit.type === 'numeric';
+            const currValue = habit.completion_value || '';
+            
+            return `
+            <div class="daily-habit-card ${habit.is_completed ? 'completed' : ''}" data-id="${habit.id}" data-type="${habit.type}" data-target="${habit.target}" style="display: flex; align-items: center; padding: 20px; background: var(--surface); border: 1px solid var(--border-color); border-radius: var(--radius-md); ${isNumeric ? '' : 'cursor: pointer;'} transition: all 0.2s ease;">
+                
+                ${!isNumeric ? `
                 <div style="margin-right: 20px; font-size: 26px;">
                     <i class="fa-regular ${habit.is_completed ? 'fa-circle-check' : 'fa-circle'} check-icon" style="color: ${habit.is_completed ? 'var(--primary)' : 'var(--text-muted)'}; transition: color 0.2s;"></i>
                 </div>
+                ` : ''}
+
                 <div style="flex: 1;">
                     <h3 class="habit-title" style="margin-bottom: 4px; font-size: 18px; transition: all 0.2s ease;">${habit.name}</h3>
                     <div class="text-muted" style="font-size: 13px;"><i class="fa-solid ${habit.icon}"></i> ${habit.priority} Priority</div>
                 </div>
+
+                ${isNumeric ? `
+                <div class="habit-numeric-control" style="margin-left: 12px;">
+                    <input type="number" class="numeric-input" value="${currValue}" placeholder="0">
+                    <span class="numeric-unit">/ ${habit.target} ${habit.unit || ''}</span>
+                    <button class="btn-log"><i class="fa-solid fa-floppy-disk"></i></button>
+                </div>
+                ` : ''}
             </div>
-        `).join('');
+        `}).join('');
         updateProgressDisplay();
     } catch (error) { container.innerHTML = `<p class="text-danger">Failed to load habits: ${error.message}</p>`; }
 }
@@ -581,7 +821,11 @@ async function renderHabitsPage(container) {
                 id: editBtn.dataset.id,
                 name: editBtn.dataset.name,
                 icon: editBtn.dataset.icon,
-                priority: editBtn.dataset.priority
+                priority: editBtn.dataset.priority,
+                type: editBtn.dataset.type,
+                target: editBtn.dataset.target,
+                unit: editBtn.dataset.unit,
+                frequency: editBtn.dataset.frequency
             };
             openHabitModal(loadHabitsUI, habitData);
         }
@@ -622,8 +866,8 @@ function renderFilteredHabits() {
                 </div>
             </div>
             <div class="habit-manage-actions">
-                ${showingArchived ? `<button class="btn-icon text-danger btn-delete-permanent" data-id="${habit.id}"><i class="fa-solid fa-trash"></i></button>` 
-                : `<button class="btn-icon btn-edit" data-id="${habit.id}" data-name="${habit.name.replace(/"/g, '&quot;')}" data-icon="${habit.icon}" data-priority="${habit.priority}"><i class="fa-solid fa-pencil"></i></button>
+                    ${showingArchived ? `<button class="btn-icon text-danger btn-delete-permanent" data-id="${habit.id}"><i class="fa-solid fa-trash"></i></button>` 
+                : `<button class="btn-icon btn-edit" data-id="${habit.id}" data-name="${habit.name.replace(/"/g, '&quot;')}" data-icon="${habit.icon}" data-priority="${habit.priority}" data-type="${habit.type}" data-target="${habit.target}" data-unit="${habit.unit || ''}" data-frequency="${habit.frequency || 'daily'}"><i class="fa-solid fa-pencil"></i></button>
                    <button class="btn-icon text-danger btn-archive" data-id="${habit.id}"><i class="fa-solid fa-box-archive"></i></button>`}
             </div>
         </div>
@@ -745,9 +989,10 @@ async function renderInsightsPage(container) {
 async function renderGoalsPage(container) {
     container.innerHTML = `
         <div class="dashboard-header"><div><h1>Goals</h1><p class="text-muted">Long-term objectives and milestones.</p></div><button id="btn-add-goal" class="btn btn-primary"><i class="fa-solid fa-plus"></i> Add Goal</button></div>
-        <div id="goals-list" style="display: flex; flex-direction: column; gap: 12px; margin-top: 24px;"></div>
+        <div id="goals-list" style="display: flex; flex-direction: column; gap: 12px; margin-top: 24px;"><p class="text-muted"><i class="fa-solid fa-spinner fa-spin"></i> Loading goals...</p></div>
     `;
-    renderGoalsList();
+    
+    await renderGoalsListUI();
 
     document.getElementById('btn-add-goal').addEventListener('click', () => {
         const modalContainer = document.getElementById('modals-container');
@@ -756,7 +1001,10 @@ async function renderGoalsPage(container) {
                 <div class="modal-content" style="max-width: 400px;">
                     <h3 style="margin-bottom: 12px; font-size: 20px;">Add New Goal</h3>
                     <p class="text-muted" style="margin-bottom: 16px;">Enter your new long-term objective.</p>
-                    <input type="text" id="goal-input-name" autocomplete="off" style="width: 100%; padding: 12px; margin-bottom: 24px; background: var(--bg-deep); border: 1px solid var(--border-color); color: white; border-radius: var(--radius-sm);" placeholder="e.g., Run a marathon...">
+                    <label style="display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 14px;">Goal Name</label>
+                    <input type="text" id="goal-input-name" autocomplete="off" style="width: 100%; padding: 12px; margin-bottom: 16px; background: var(--bg-deep); border: 1px solid var(--border-color); color: white; border-radius: var(--radius-sm);" placeholder="e.g., Run a marathon...">
+                    <label style="display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 14px;">Target Value (e.g., 100 points, 50 hours)</label>
+                    <input type="number" id="goal-input-target" autocomplete="off" style="width: 100%; padding: 12px; margin-bottom: 24px; background: var(--bg-deep); border: 1px solid var(--border-color); color: white; border-radius: var(--radius-sm);" placeholder="100" value="100">
                     <div style="display: flex; gap: 12px; justify-content: flex-end;">
                         <button id="btn-goal-cancel" class="btn" style="background: transparent; border: 1px solid var(--border-color); color: white;">Cancel</button>
                         <button id="btn-goal-save" class="btn btn-primary">Save Goal</button>
@@ -766,52 +1014,186 @@ async function renderGoalsPage(container) {
         `;
         document.getElementById('goal-input-name').focus();
         document.getElementById('btn-goal-cancel').addEventListener('click', () => modalContainer.innerHTML = '');
-        document.getElementById('btn-goal-save').addEventListener('click', () => {
+        
+        document.getElementById('btn-goal-save').addEventListener('click', async () => {
             const goalName = document.getElementById('goal-input-name').value;
+            const targetVal = parseFloat(document.getElementById('goal-input-target').value) || 100;
             if (goalName && goalName.trim() !== "") {
-                const goals = JSON.parse(localStorage.getItem('smht_goals') || '[]');
-                goals.push({ id: Date.now(), text: goalName.trim(), completed: false });
-                localStorage.setItem('smht_goals', JSON.stringify(goals));
-                showToast("Goal added!", "success");
-                renderGoalsList();
-                modalContainer.innerHTML = '';
+                try {
+                    const btnSave = document.getElementById('btn-goal-save');
+                    btnSave.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+                    await createGoal(goalName.trim(), targetVal);
+                    showToast("Goal added!", "success");
+                    await renderGoalsListUI();
+                    modalContainer.innerHTML = '';
+                } catch (error) {
+                    showToast("Failed to save goal.", "error");
+                }
             } else showToast("Please enter a goal name", "error");
         });
     });
+
+    // Event delegation for checkboxes and delete buttons
+    const listContainer = document.getElementById('goals-list');
+    listContainer.addEventListener('change', async (e) => {
+        if (e.target.classList.contains('goal-checkbox')) {
+            const goalId = e.target.dataset.id;
+            const isChecked = e.target.checked;
+            try {
+                await toggleGoalCompletion(goalId, isChecked);
+                if(isChecked) showToast("Goal achieved! Incredible work.", "success");
+                await renderGoalsListUI();
+            } catch (error) {
+                showToast("Error updating goal.", "error");
+                e.target.checked = !isChecked; // Revert UI
+            }
+        }
+    });
+
+    listContainer.addEventListener('click', async (e) => {
+        const deleteBtn = e.target.closest('.btn-delete-goal');
+        if (deleteBtn) {
+            const goalId = deleteBtn.dataset.id;
+            showConfirmDialog("Delete Goal?", "Are you sure you want to remove this goal?", async () => {
+                try {
+                    deleteBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+                    await deleteGoal(goalId);
+                    showToast("Goal removed.", "info");
+                    await renderGoalsListUI();
+                } catch (error) {
+                    showToast("Error deleting goal.", "error");
+                    await renderGoalsListUI();
+                }
+            });
+        }
+    });
 }
 
-function renderGoalsList() {
+async function renderGoalsListUI() {
     const list = document.getElementById('goals-list');
-    const goals = JSON.parse(localStorage.getItem('smht_goals') || '[]');
-    if (goals.length === 0) {
-        list.innerHTML = `<div class="glass-panel" style="text-align: center; padding: 40px;"><i class="fa-solid fa-bullseye" style="font-size: 48px; color: var(--border-color); margin-bottom: 16px;"></i><h3 style="margin-bottom: 8px;">No goals set</h3></div>`;
-        return;
-    }
-    list.innerHTML = goals.map(goal => `
-        <div class="glass-panel" style="display: flex; align-items: center; justify-content: space-between; padding: 16px; ${goal.completed ? 'opacity: 0.6;' : ''}">
-            <div style="display: flex; align-items: center; gap: 16px;">
-                <input type="checkbox" class="goal-checkbox" data-id="${goal.id}" ${goal.completed ? 'checked' : ''} style="width: 20px; height: 20px; cursor: pointer;">
-                <span style="font-size: 16px; font-weight: 500; ${goal.completed ? 'text-decoration: line-through; color: var(--text-muted);' : ''}">${goal.text}</span>
-            </div>
-            <button class="btn-icon text-danger btn-delete-goal" data-id="${goal.id}"><i class="fa-solid fa-trash"></i></button>
-        </div>
-    `).join('');
+    try {
+        const goals = await getGoals();
+        if (goals.length === 0) {
+            list.innerHTML = `<div class="glass-panel" style="text-align: center; padding: 40px;"><i class="fa-solid fa-bullseye" style="font-size: 48px; color: var(--border-color); margin-bottom: 16px;"></i><h3 style="margin-bottom: 8px;">No goals set</h3></div>`;
+            return;
+        }
+        
+        list.innerHTML = goals.map(goal => {
+            const isCompleted = goal.status === 'completed';
+            const progress = (parseFloat(goal.current_value) / parseFloat(goal.target_value)) * 100;
+            const displayProgress = Math.min(Math.max(progress, 0), 100).toFixed(0);
 
-    document.querySelectorAll('.goal-checkbox').forEach(box => {
-        box.addEventListener('change', (e) => {
-            const updatedGoals = goals.map(g => g.id === parseInt(e.target.dataset.id) ? { ...g, completed: e.target.checked } : g);
-            localStorage.setItem('smht_goals', JSON.stringify(updatedGoals));
-            if(e.target.checked) showToast("Goal achieved!", "success");
-            renderGoalsList();
+            return `
+            <div class="glass-panel" style="display: flex; flex-direction: column; gap: 12px; padding: 20px; ${isCompleted ? 'opacity: 0.7;' : ''}">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <div style="display: flex; align-items: center; gap: 16px;">
+                        <input type="checkbox" class="goal-checkbox" data-id="${goal.id}" ${isCompleted ? 'checked' : ''} style="width: 20px; height: 20px; cursor: pointer;">
+                        <span style="font-size: 18px; font-weight: 600; ${isCompleted ? 'text-decoration: line-through; color: var(--text-muted);' : ''}">${goal.title}</span>
+                    </div>
+                    <button class="btn-icon text-danger btn-delete-goal" data-id="${goal.id}"><i class="fa-solid fa-trash"></i></button>
+                </div>
+                <div style="display: flex; align-items: center; gap: 12px; margin-left: 36px;">
+                    <div style="flex: 1; height: 8px; background: var(--bg-deep); border-radius: 4px; overflow: hidden; border: 1px solid var(--border-color);">
+                        <div style="width: ${displayProgress}%; height: 100%; background: var(--primary); transition: width 0.3s ease;"></div>
+                    </div>
+                    <span style="font-size: 12px; color: var(--text-muted); font-weight: 600;">${displayProgress}%</span>
+                </div>
+            </div>
+            `;
+        }).join('');
+    } catch (error) {
+        list.innerHTML = `<p class="text-danger">Error loading goals: ${error.message}</p>`;
+    }
+}
+
+// --- Journal / Reflections ---
+async function renderJournalPage(container) {
+    const today = new Date();
+    const displayDate = today.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+    const dateString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+    container.innerHTML = `
+        <div class="dashboard-header">
+            <div><h1>Daily Journal</h1><p class="text-muted"><i class="fa-regular fa-calendar"></i> ${displayDate}</p></div>
+        </div>
+        <div class="glass-panel" style="margin-top: 24px; padding: 32px;">
+            <p class="text-muted" id="journal-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading today's entry...</p>
+            
+            <div id="journal-content" style="display: none;">
+                <div style="margin-bottom: 32px;">
+                    <label style="display: block; margin-bottom: 12px; color: var(--text-muted); font-size: 14px; font-weight: 600;">How are you feeling today?</label>
+                    <div style="display: flex; gap: 12px; flex-wrap: wrap;" id="mood-selector">
+                        <button class="btn-icon mood-btn" data-mood="Great" style="width: 50px; height: 50px; font-size: 24px;" title="Great">😁</button>
+                        <button class="btn-icon mood-btn" data-mood="Good" style="width: 50px; height: 50px; font-size: 24px;" title="Good">🙂</button>
+                        <button class="btn-icon mood-btn" data-mood="Okay" style="width: 50px; height: 50px; font-size: 24px;" title="Okay">😐</button>
+                        <button class="btn-icon mood-btn" data-mood="Stressed" style="width: 50px; height: 50px; font-size: 24px;" title="Stressed">😫</button>
+                        <button class="btn-icon mood-btn" data-mood="Bad" style="width: 50px; height: 50px; font-size: 24px;" title="Bad">😔</button>
+                    </div>
+                </div>
+                
+                <div style="margin-bottom: 24px;">
+                    <label style="display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 14px; font-weight: 600;">Daily Notes & Ideas</label>
+                    <textarea id="journal-note" rows="8" placeholder="Brain dump your thoughts, study notes, or new pipe cleaner flower designs here..." style="width: 100%; padding: 16px; background: var(--bg-deep); border: 1px solid var(--border-color); color: white; border-radius: var(--radius-sm); resize: vertical; font-family: var(--font-ui); line-height: 1.6;"></textarea>
+                </div>
+                
+                <div style="text-align: right;">
+                    <button id="btn-save-journal" class="btn btn-primary"><i class="fa-solid fa-floppy-disk"></i> Save Entry</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    try {
+        const reflection = await getDailyReflection(dateString);
+        document.getElementById('journal-loading').style.display = 'none';
+        document.getElementById('journal-content').style.display = 'block';
+
+        let selectedMood = reflection ? reflection.mood : null;
+        const noteInput = document.getElementById('journal-note');
+        const moodBtns = document.querySelectorAll('.mood-btn');
+        
+        if (reflection && reflection.note) noteInput.value = reflection.note;
+
+        const updateMoodUI = () => {
+            moodBtns.forEach(btn => {
+                if (btn.dataset.mood === selectedMood) {
+                    btn.style.background = 'var(--primary-glow)';
+                    btn.style.borderColor = 'var(--primary)';
+                } else {
+                    btn.style.background = 'transparent';
+                    btn.style.borderColor = 'transparent';
+                }
+            });
+        };
+        updateMoodUI(); // Run once on load
+
+        moodBtns.forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                selectedMood = e.currentTarget.dataset.mood;
+                updateMoodUI();
+            });
         });
-    });
-    document.querySelectorAll('.btn-delete-goal').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            localStorage.setItem('smht_goals', JSON.stringify(goals.filter(g => g.id !== parseInt(e.currentTarget.dataset.id))));
-            showToast("Goal removed.", "info");
-            renderGoalsList();
+
+        document.getElementById('btn-save-journal').addEventListener('click', async () => {
+            const btnSave = document.getElementById('btn-save-journal');
+            const originalText = btnSave.innerHTML;
+            btnSave.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
+            btnSave.disabled = true;
+
+            try {
+                await saveDailyReflection(dateString, selectedMood, noteInput.value.trim());
+                showToast("Journal entry saved!", "success");
+            } catch (error) {
+                showToast("Failed to save entry.", "error");
+            } finally {
+                btnSave.innerHTML = originalText;
+                btnSave.disabled = false;
+            }
         });
-    });
+
+    } catch (error) {
+        document.getElementById('journal-loading').innerHTML = `<span class="text-danger">Failed to load journal: ${error.message}</span>`;
+    }
 }
 
 // --- Profile ---
@@ -882,6 +1264,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             else if (route === 'habits') renderHabitsPage(viewContainer);
             else if (route === 'calendar') renderCalendarPage(viewContainer);
             else if (route === 'goals') renderGoalsPage(viewContainer);
+            else if (route === 'journal') renderJournalPage(viewContainer);
             else if (route === 'insights') renderInsightsPage(viewContainer);
             else if (route === 'profile') renderProfilePage(viewContainer);
             else viewContainer.innerHTML = `<h1>404</h1><p>Coming Soon.</p>`;

@@ -264,6 +264,13 @@ h1, h2, h3, h4, h5, h6 {
 .habit-action.completed { background: var(--success); border-color: var(--success); color: var(--bg-deep); transform: scale(1.05); }
 .habit-action.completed::after { content: '\f00c'; font-family: 'Font Awesome 6 Free'; font-weight: 900; font-size: 20px; }
 
+.habit-numeric-control { display: flex; align-items: center; background: var(--bg-deep); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 4px; }
+.numeric-input { width: 60px; padding: 8px; text-align: center; background: transparent; border: none; color: var(--text-main); font-weight: 600; font-family: var(--font-heading); }
+.numeric-input:focus { outline: none; }
+.numeric-unit { font-size: 13px; color: var(--text-muted); padding-right: 12px; border-right: 1px solid var(--border-color); }
+.btn-log { padding: 8px 16px; background: transparent; color: var(--primary); border: none; cursor: pointer; font-weight: 600; transition: var(--transition-fast); }
+.btn-log:hover { background: var(--primary-glow); border-radius: 6px; }
+
 /* Habits Manage */
 .habits-header-actions { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 16px; }
 .habit-manage-list { display: flex; flex-direction: column; gap: 16px; }
