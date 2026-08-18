@@ -96,26 +96,35 @@ async function createHabit(habitData) {
 
 async function updateHabit(habitId, habitData) {
     const { data: sessionData } = await supabase.auth.getSession();
+    const userId = sessionData.session.user.id;
     const { data, error } = await supabase.from('habits').update({
         name: habitData.name, icon: habitData.icon, priority: habitData.priority, type: habitData.type, target: habitData.target, unit: habitData.unit, frequency: habitData.frequency, updated_at: new Date().toISOString()
-    }).eq('id', habitId).select().single();
+    }).eq('id', habitId).eq('user_id', userId).select().single();
     if (error) throw error;
     
-    await supabase.from('goal_habits').delete().eq('habit_id', habitId);
+    await supabase.from('goal_habits').delete().eq('habit_id', habitId).eq('user_id', userId);
     if (habitData.goal_id) {
-        await supabase.from('goal_habits').insert([{ goal_id: habitData.goal_id, habit_id: habitId, user_id: sessionData.session.user.id }]);
+        await supabase.from('goal_habits').insert([{ goal_id: habitData.goal_id, habit_id: habitId, user_id: userId }]);
     }
     return data;
 }
 
 async function archiveHabit(habitId) {
-    const { error } = await supabase.from('habits').update({ status: 'archived', updated_at: new Date().toISOString() }).eq('id', habitId);
+    const { data: sessionData } = await supabase.auth.getSession();
+    const { error } = await supabase.from('habits').update({ status: 'archived', updated_at: new Date().toISOString() }).eq('id', habitId).eq('user_id', sessionData.session.user.id);
     if (error) throw error;
     return true;
 }
 
 async function deleteHabitPermanently(habitId) {
-    const { error } = await supabase.from('habits').delete().eq('id', habitId);
+    const { data: sessionData } = await supabase.auth.getSession();
+    const userId = sessionData.session.user.id;
+    
+    // Clean up foreign key dependencies to prevent database constraint crashes
+    await supabase.from('goal_habits').delete().eq('habit_id', habitId).eq('user_id', userId);
+    await supabase.from('habit_completions').delete().eq('habit_id', habitId).eq('user_id', userId);
+    
+    const { error } = await supabase.from('habits').delete().eq('id', habitId).eq('user_id', userId);
     if (error) throw error;
     return true;
 }
@@ -127,18 +136,76 @@ async function updateGoalProgressFromHabit(habitId, valueAdded) {
     const { data: links } = await supabase.from('goal_habits').select('goal_id').eq('habit_id', habitId).eq('user_id', userId);
     if (links && links.length > 0) {
         for (const link of links) {
-            const { data: goal } = await supabase.from('goals').select('current_value, target_value').eq('id', link.goal_id).single();
+            const { data: goal } = await supabase.from('goals').select('current_value, target_value').eq('id', link.goal_id).eq('user_id', userId).single();
             if (goal) {
                 let newVal = parseFloat(goal.current_value) + parseFloat(valueAdded);
                 if (newVal < 0) newVal = 0;
                 let status = newVal >= parseFloat(goal.target_value) ? 'completed' : 'active';
-                await supabase.from('goals').update({ current_value: newVal, status: status }).eq('id', link.goal_id);
+                await supabase.from('goals').update({ 
+                    current_value: newVal, 
+                    status: status,
+                    updated_at: new Date().toISOString()
+                }).eq('id', link.goal_id).eq('user_id', userId);
             }
         }
     }
 }
 
 // --- Completion Service ---
+function isHabitScheduledForDate(habit, dateObj) {
+    const dayOfWeek = dateObj.getDay();
+    const isWeekend = (dayOfWeek === 0 || dayOfWeek === 6);
+    if (habit.frequency === 'weekdays' && isWeekend) return false;
+    if (habit.frequency === 'weekends' && !isWeekend) return false;
+    return true;
+}
+
+function calculateHabitStreak(habit, completions) {
+    if (!completions || completions.length === 0) return { current: 0, best: 0 };
+    const completedDates = new Set(completions.filter(c => c.completed).map(c => c.completion_date));
+    if (completedDates.size === 0) return { current: 0, best: 0 };
+
+    let currentStreak = 0; let bestStreak = 0; let tempStreak = 0;
+    const today = new Date(); today.setHours(0,0,0,0);
+    const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    let checkDate = new Date(today);
+    let isActive = true;
+
+    // Calculate Current Streak (Iterate backwards)
+    while (isActive) {
+        const dateStr = `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`;
+        if (isHabitScheduledForDate(habit, checkDate)) {
+            if (completedDates.has(dateStr)) {
+                currentStreak++;
+            } else if (dateStr !== todayStr) {
+                isActive = false; // Missed a scheduled day in the past
+            }
+        }
+        checkDate.setDate(checkDate.getDate() - 1);
+        if (checkDate.getFullYear() < today.getFullYear() - 5) break; // Safety limit
+    }
+
+    // Calculate Best Streak (Iterate forwards from first completion)
+    const sortedCompletions = completions.filter(c => c.completed).sort((a, b) => new Date(a.completion_date) - new Date(b.completion_date));
+    if (sortedCompletions.length > 0) {
+        let iterDate = new Date(sortedCompletions[0].completion_date + 'T00:00:00');
+        iterDate.setHours(0,0,0,0);
+        while (iterDate <= today) {
+            const dStr = `${iterDate.getFullYear()}-${String(iterDate.getMonth() + 1).padStart(2, '0')}-${String(iterDate.getDate()).padStart(2, '0')}`;
+            if (isHabitScheduledForDate(habit, iterDate)) {
+                if (completedDates.has(dStr)) {
+                    tempStreak++;
+                    if (tempStreak > bestStreak) bestStreak = tempStreak;
+                } else {
+                    tempStreak = 0;
+                }
+            }
+            iterDate.setDate(iterDate.getDate() + 1);
+        }
+    }
+    return { current: currentStreak, best: bestStreak };
+}
+
 async function getDailyHabits(dateString) {
     const { data: sessionData } = await supabase.auth.getSession();
     if (!sessionData.session) throw new Error("User not logged in");
@@ -147,25 +214,25 @@ async function getDailyHabits(dateString) {
     const { data: habits, error: habitsError } = await supabase.from('habits').select('*').eq('user_id', userId).eq('status', 'active').order('display_order', { ascending: true }).order('created_at', { ascending: false });
     if (habitsError) throw habitsError;
     
-    const { data: completions, error: compError } = await supabase.from('habit_completions').select('*').eq('user_id', userId).eq('completion_date', dateString);
+    // Fetch all completions for the user to accurately calculate dynamic streaks
+    const { data: completions, error: compError } = await supabase.from('habit_completions').select('*').eq('user_id', userId);
     if (compError) throw compError;
     
     const targetDate = new Date(dateString + 'T00:00:00'); 
-    const dayOfWeek = targetDate.getDay();
-    const isWeekend = (dayOfWeek === 0 || dayOfWeek === 6);
-
-    const scheduledHabits = habits.filter(habit => {
-        if (habit.frequency === 'weekdays' && isWeekend) return false;
-        if (habit.frequency === 'weekends' && !isWeekend) return false;
-        return true; 
-    });
+    
+    const scheduledHabits = habits.filter(habit => isHabitScheduledForDate(habit, targetDate));
 
     return scheduledHabits.map(habit => {
-        const completionRecord = completions.find(c => c.habit_id === habit.id);
+        const habitCompletions = completions.filter(c => c.habit_id === habit.id);
+        const todayRecord = habitCompletions.find(c => c.completion_date === dateString);
+        const streaks = calculateHabitStreak(habit, habitCompletions);
+        
         return { 
             ...habit, 
-            is_completed: completionRecord ? completionRecord.completed : false,
-            completion_value: completionRecord ? completionRecord.value : null
+            is_completed: todayRecord ? todayRecord.completed : false,
+            completion_value: todayRecord ? todayRecord.value : null,
+            current_streak: streaks.current,
+            best_streak: streaks.best
         };
     });
 }
@@ -267,19 +334,27 @@ async function createGoal(title, targetValue = 100) {
 }
 
 async function toggleGoalCompletion(goalId, isCompleted) {
-    const { data: goal } = await supabase.from('goals').select('target_value').eq('id', goalId).single();
+    const { data: sessionData } = await supabase.auth.getSession();
+    const userId = sessionData.session.user.id;
+    const { data: goal } = await supabase.from('goals').select('target_value').eq('id', goalId).eq('user_id', userId).single();
     const newStatus = isCompleted ? 'completed' : 'active';
     const newValue = isCompleted ? (goal ? goal.target_value : 100) : 0;
     const { error } = await supabase.from('goals').update({ 
         status: newStatus,
         current_value: newValue,
         updated_at: new Date().toISOString()
-    }).eq('id', goalId);
+    }).eq('id', goalId).eq('user_id', userId);
     if (error) throw error;
 }
 
 async function deleteGoal(goalId) {
-    const { error } = await supabase.from('goals').delete().eq('id', goalId);
+    const { data: sessionData } = await supabase.auth.getSession();
+    const userId = sessionData.session.user.id;
+    
+    // Clean up linked habits to prevent foreign key constraint violations
+    await supabase.from('goal_habits').delete().eq('goal_id', goalId).eq('user_id', userId);
+    
+    const { error } = await supabase.from('goals').delete().eq('id', goalId).eq('user_id', userId);
     if (error) throw error;
 }
 
@@ -307,8 +382,12 @@ async function saveDailyReflection(dateString, mood, note) {
     const { data: existing } = await supabase.from('daily_reflections').select('id').eq('user_id', userId).eq('reflection_date', dateString).maybeSingle();
 
     if (existing) {
-        // Update existing entry
-        const { error } = await supabase.from('daily_reflections').update({ mood: mood, note: note, updated_at: new Date().toISOString() }).eq('id', existing.id);
+        // Update existing entry (Secured with user_id enforcement)
+        const { error } = await supabase.from('daily_reflections').update({ 
+            mood: mood, 
+            note: note, 
+            updated_at: new Date().toISOString() 
+        }).eq('id', existing.id).eq('user_id', userId);
         if (error) throw error;
     } else {
         // Create new entry
@@ -407,16 +486,24 @@ async function openHabitModal(onSuccessCallback, existingHabit = null) {
                         </div>
                     </div>
                     
-                    try {
-            const habitData = {
-                name: document.getElementById('habit-name').value,
-                icon: selectedIcon,
-                priority: document.getElementById('habit-priority').value,
-                type: document.getElementById('habit-type').value,
-                target: parseFloat(document.getElementById('habit-target').value) || 1,
-                unit: document.getElementById('habit-unit').value.trim(),
-                frequency: document.getElementById('habit-frequency').value
-            };
+                    <div style="display: flex; gap: 12px; margin-bottom: 20px;">
+                        <div style="flex: 1;">
+                            <label style="display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 14px;">Priority</label>
+                            <select id="habit-priority" style="width: 100%; padding: 12px; background: var(--bg-deep); border: 1px solid var(--border-color); color: white; border-radius: var(--radius-sm); cursor: pointer;">
+                                <option value="Low" ${isEdit && existingHabit.priority === 'Low' ? 'selected' : ''}>Low</option>
+                                <option value="Medium" ${!isEdit || existingHabit.priority === 'Medium' ? 'selected' : ''}>Medium</option>
+                                <option value="High" ${isEdit && existingHabit.priority === 'High' ? 'selected' : ''}>High</option>
+                            </select>
+                        </div>
+                        <div style="flex: 1;">
+                            <label style="display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 14px;">Schedule</label>
+                            <select id="habit-frequency" style="width: 100%; padding: 12px; background: var(--bg-deep); border: 1px solid var(--border-color); color: white; border-radius: var(--radius-sm); cursor: pointer;">
+                                <option value="daily" ${!isEdit || existingHabit.frequency === 'daily' ? 'selected' : ''}>Everyday</option>
+                                <option value="weekdays" ${isEdit && existingHabit.frequency === 'weekdays' ? 'selected' : ''}>Weekdays</option>
+                                <option value="weekends" ${isEdit && existingHabit.frequency === 'weekends' ? 'selected' : ''}>Weekends</option>
+                            </select>
+                        </div>
+                    </div>
                     
                     <div style="margin-bottom: 20px;">
                         <label style="display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 14px;">Habit Type</label>
@@ -489,7 +576,7 @@ async function openHabitModal(onSuccessCallback, existingHabit = null) {
                 type: document.getElementById('habit-type').value,
                 target: parseFloat(document.getElementById('habit-target').value) || 1,
                 unit: document.getElementById('habit-unit').value.trim(),
-                frequency: 'daily',
+                frequency: document.getElementById('habit-frequency').value,
                 goal_id: document.getElementById('habit-goal-link').value || null
             };
 
@@ -612,6 +699,7 @@ async function loadDailyHabitsUI(dateString) {
         container.innerHTML = habits.map(habit => {
             const isNumeric = habit.type === 'numeric';
             const currValue = habit.completion_value || '';
+            const streakDisplay = habit.current_streak > 0 ? `<span style="color: var(--warning); margin-left: 8px; font-weight: 600;"><i class="fa-solid fa-fire"></i> ${habit.current_streak}</span>` : '';
             
             return `
             <div class="daily-habit-card ${habit.is_completed ? 'completed' : ''}" data-id="${habit.id}" data-type="${habit.type}" data-target="${habit.target}" style="display: flex; align-items: center; padding: 20px; background: var(--surface); border: 1px solid var(--border-color); border-radius: var(--radius-md); ${isNumeric ? '' : 'cursor: pointer;'} transition: all 0.2s ease;">
@@ -624,7 +712,10 @@ async function loadDailyHabitsUI(dateString) {
 
                 <div style="flex: 1;">
                     <h3 class="habit-title" style="margin-bottom: 4px; font-size: 18px; transition: all 0.2s ease;">${habit.name}</h3>
-                    <div class="text-muted" style="font-size: 13px;"><i class="fa-solid ${habit.icon}"></i> ${habit.priority} Priority</div>
+                    <div class="text-muted" style="font-size: 13px; display: flex; align-items: center;">
+                        <span><i class="fa-solid ${habit.icon}"></i> ${habit.priority} Priority</span>
+                        ${streakDisplay}
+                    </div>
                 </div>
 
                 ${isNumeric ? `
@@ -920,12 +1011,27 @@ async function renderInsightsPage(container) {
 
     try {
         const stats = await getInsightStats();
+        const activeHabits = await getHabits();
         const trendData = await getWeeklyTrend();
         const dates = Object.keys(trendData);
         const completionCounts = Object.values(trendData);
         
         // 1. Calculate the Completion Rate (Red/Yellow/Green logic)
-        const totalPossibleCompletions = stats.totalHabits * 7;
+        let totalPossibleCompletions = 0;
+        
+        // Use the authoritative Phase 3 engine to calculate exact possible completions
+        activeHabits.forEach(habit => {
+            const habitCreatedAt = new Date(habit.created_at);
+            habitCreatedAt.setHours(0,0,0,0);
+            
+            dates.forEach(dateStr => {
+                const checkDate = new Date(dateStr + 'T00:00:00');
+                if (checkDate >= habitCreatedAt && isHabitScheduledForDate(habit, checkDate)) {
+                    totalPossibleCompletions++;
+                }
+            });
+        });
+        
         const actualCompletionsThisWeek = completionCounts.reduce((sum, count) => sum + count, 0);
         let completionPercentage = 0;
         
@@ -945,13 +1051,13 @@ async function renderInsightsPage(container) {
         if (stats.totalHabits === 0) {
             insightMessage = "You haven't set up any active habits yet! Head over to the Habits tab to start building your routine.";
         } else if (completionPercentage >= 80) {
-            insightMessage = "Incredible consistency! You are crushing your goals this week. Keep protecting this momentum, especially with your pharmacy study blocks and creative crochet time.";
+            insightMessage = "Incredible consistency! You are crushing your goals this week. Keep protecting this momentum and stick to your schedule.";
         } else if (completionPercentage >= 50) {
-            insightMessage = "You're holding a steady pace. You've completed a good chunk of your habits, but there's room to push a little harder on your daily routine. Make sure you are balancing your studies with your craft breaks!";
+            insightMessage = "You're holding a steady pace. You've completed a good chunk of your habits, but there's room to push a little harder on your daily routine.";
         } else if (actualCompletionsThisWeek > 0) {
             insightMessage = "It's been a challenging week for your routines, but every step counts. Don't be too hard on yourself. Pick one core habit to focus on tomorrow and rebuild your streak.";
         } else {
-            insightMessage = "We're waiting for your first completion this week! Remember why you started—take just 15 minutes today to check off a quick habit like hydration or a short study block.";
+            insightMessage = "We're waiting for your first completion this week! Remember why you started—take just 15 minutes today to check off a quick habit.";
         }
 
         document.getElementById('ai-insight-container').innerHTML = `
